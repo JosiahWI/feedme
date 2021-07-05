@@ -72,10 +72,10 @@ class FeedMe(commands.Cog):
             print("Checking for updated feeds...")
             updates: dict[str, str] = pickle.load(open(UPDATES_FILE, "rb"))
             for entry in reversed(feed.entries):
-                #if updates.get(entry.id, "") != entry.updated:
-                if True:
+                if updates.get(entry.id, "") != entry.updated:
                     print(f"Found updated feed {entry.title}!")
                     await self.post_update(entry)
+                    updates[entry.id] = entry.updated
             # If the code is interrupted here, the update may duplicate.
             pickle.dump(updates, open(UPDATES_FILE, "wb"))
             await asyncio.sleep(self.config["DEFAULT"].getint("Interval"))
