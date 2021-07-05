@@ -38,6 +38,7 @@ class FeedMe(commands.Cog):
         )
         await channel.send(embed=embed)
 
+    @commands.is_owner()
     @commands.command(help="start polling")
     async def start(self, ctx: commands.Context) -> None:
         if self.poller is None:
@@ -45,7 +46,8 @@ class FeedMe(commands.Cog):
             await ctx.send("Started.")
         else:
             await ctx.send("Already running!")
-            
+
+    @commands.is_owner()
     @commands.command(help="stop polling")
     async def stop(self, ctx: commands.Context) -> None:
         if self.poller is not None:
