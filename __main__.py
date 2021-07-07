@@ -21,6 +21,7 @@ async def start() -> None:
         bot_token = token_file.readline().strip()
 
     loop = asyncio.get_running_loop()
+    loop.set_debug(True)
     async with aiohttp.ClientSession(loop=loop) as session:
         setattr(bot, "session", session)
         await bot.start(bot_token)
