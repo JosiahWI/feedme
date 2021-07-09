@@ -5,6 +5,7 @@ import configparser
 import datetime
 import pathlib
 import pickle
+import sqlite3
 from typing import Callable, Optional
 
 import aiohttp
@@ -24,6 +25,93 @@ class BadResponseError(Exception):
     
 class MissingSessionError(Exception):
     pass
+
+class Feed:
+    """
+    A Feed represents one feed with a discord channel and a feed url.
+    """
+    
+    def __init__(self, name: str, channel_id: int,
+            guild_id: int, url: str) -> None:
+        """
+        name: The name of the feed.
+        channel_id: The ID of the Discord channel to send to.
+        guild_id: The ID of the guild the channel is part of.
+        url: The URL of the web feed.
+        """
+        self.name = name
+        self.channel_id = channel_id
+        self.guild_id = guild_id
+        self.url = url
+        
+    def __str__(self) -> str:
+        return f"{self.name} in channel {self.channel_id}"
+
+    async def commit(self) -> None:
+        """
+        Coroutine to save the feed to the database.
+        
+        Will raise an error if the channel already has a feed in it.
+        """
+        async with aiosqlite.connect(DATABASE) as db:
+            await db.execute(
+                "INSERT INTO feeds(name, channel_id, guild_id, url) " \
+                "VALUES (?, ?, ?, ?);",
+                (self.name, self.channel_id, self.guild_id, self.url))
+            await db.commit()
+            
+    @staticmethod
+    async def load_all() -> list[Feed]:
+        """
+        Static coroutine to load all feeds in the database.
+    
+        Returns a list of Feeds.
+        """
+        feeds = []
+        async with aiosqlite.connect(DATABASE) as db:
+            async with db.execute("SELECT * FROM feeds;") as cursor:
+                async for row in cursor:
+                    feeds.append(Feed(*row))
+        
+        return feeds
+    
+    @staticmethod
+    async def load_from_channel(channel_id: int) -> Optional[Feed]:
+        """
+        Static coroutine to load a channel's feed from the database.
+    
+        Returns a Feed, or None if no feed was found for that channel.
+    
+        channel_id: The ID of the discord channel the feed is set to.
+        """
+        feeds = []
+        async with aiosqlite.connect(DATABASE) as db:
+            async with db.execute(
+                    "SELECT * FROM feeds WHERE (channel_id = ?)",
+                    (channel_id,)) as cursor:
+                async for row in cursor:
+                    feeds.append(Feed(*row))
+                
+        assert(len(feeds) <= 1)
+        if len(feeds) == 0:
+            return None
+        
+        return feeds[0]
+        
+    @staticmethod
+    async def delete(channel_id: int) -> None:
+        """
+        Static coroutine to delete a channel's feed.
+        
+        If the feed does not exist, nothing will happen.
+        
+        channel_id: The ID of the discord channel the feed is set to.
+        """
+        async with aiosqlite.connect(DATABASE) as db:
+            await db.execute(
+                "DELETE FROM feeds WHERE (channel_id = ?)",
+                (channel_id,))
+            await db.commit()
 
 class FeedMe(commands.Cog):
 
@@ -60,6 +148,7 @@ class FeedMe(commands.Cog):
         if self.poller is None or self.poller.cancelled():
             self.poller = asyncio.create_task(self.poll())
             self.poller.add_done_callback(self._cleanup_poll())
+            print("INFO: Starting poller.")
             await ctx.message.add_reaction(SUCCESS_EMOJI)
         else:
             await ctx.send("Already running!")
@@ -69,14 +158,16 @@ class FeedMe(commands.Cog):
     async def stop(self, ctx: commands.Context) -> None:
         if self.poller is not None:
             self.poller.cancel()
+            print("INFO: Stopped polling.")
             await ctx.message.add_reaction(SUCCESS_EMOJI)
         else:
             await ctx.send("Already stopped!")
 
     @commands.is_owner()
-    @commands.command(help="<url> <channel> add a new feed")
-    async def new(self, ctx: commands.Context, url: str,
-            channel: discord.TextChannel) -> None:
+    @commands.guild_only()
+    @commands.command(help="<channel> <url> add a new feed")
+    async def new(self, ctx: commands.Context, channel: discord.TextChannel,
+            url: str) -> None:
         try:
             feed = feedparser.parse(await self.fetch(url))
         except BadResponseError as e:
@@ -94,14 +185,23 @@ class FeedMe(commands.Cog):
         if feed.bozo:
             await ctx.send("Feed is not well-formed.")
             return
+            
+        # To keep mypy quiet. guild_only() should handle this.
+        assert(ctx.guild is not None)
+        bot_feed = Feed(feed.feed.title, channel.id, ctx.guild.id, url)
 
-        await self.update_feed(feed.feed.title, url, channel.id, feed)
+        try:
+            await bot_feed.commit()
+        except sqlite3.IntegrityError:
+            await ctx.send("Channel already has a feed in it.")
+            return
         await ctx.message.add_reaction(SUCCESS_EMOJI)
         
     @commands.is_owner()
     @commands.command(help="<name> remove a feed")
-    async def remove(self, ctx: commands.Context, feed_url: str) -> None:
-        await self.remove_feed(feed_url)
+    async def remove(self, ctx: commands.Context,
+            channel: discord.TextChannel) -> None:
+        await Feed.delete(channel.id)
 
     async def fetch(self, feed_url: str) -> str:
         session = getattr(self.bot, "session", None)
@@ -116,27 +216,26 @@ class FeedMe(commands.Cog):
     async def check_entries(self, feed: feedparser.FeedParseDict,
             channel_id: int) -> None:
         print("Checking for updated entries...")
-        updates = await self.get_entries(feed.feed.title)
+        updates = await self.get_entries(feed.feed.title, channel_id)
         for entry in reversed(feed.entries):
             for old_entry in updates:
-                if old_entry[0] == entry.id and \
-                        old_entry[2] == entry.updated:
+                if old_entry[2] == entry.id and \
+                        old_entry[3] == entry.updated:
                     break
             else:
                 print(f"Found updated entry {entry.title}!")
                 await self.post_update(entry, channel_id)
                 # If something goes wrong here entry could get posted twice.
                 await self.update_entry(
-                    entry.id, feed.feed.title, entry.updated)
+                    entry.id, feed.feed.title, channel_id, entry.updated)
 
     async def poll(self) -> None:
-        print("Starting to poll.")
         while True:
-            feeds = await self.get_feeds()
-            for feed_record in feeds:
-                print(f"Fetching feed {feed_record[1]}...")
-                feed = feedparser.parse(await self.fetch(feed_record[1]))
-                await self.check_entries(feed, feed_record[2])
+            feeds = await Feed.load_all()
+            for bot_feed in feeds:
+                print(f"Fetching feed {bot_feed}...")
+                feed = feedparser.parse(await self.fetch(bot_feed.url))
+                await self.check_entries(feed, bot_feed.channel_id)
 
             await asyncio.sleep(self.config["DEFAULT"].getint("Interval"))
             
@@ -150,48 +249,35 @@ class FeedMe(commands.Cog):
             
             e = future.exception()
             if isinstance(e, Exception):
-                raise e
+                print("INFO: Restarting poller.")
                 self.poller = asyncio.create_task(self.poll())
-                
-            print("Stopped polling.")
-            
+                raise e
+                            
         return cleanup
             
-    async def update_feed(self, name: str, feed_url: str,
-        channel_id: int, feed: feedparser.FeedParseDict) -> None:
-        async with aiosqlite.connect(DATABASE) as db:
-            await db.execute(
-                "REPLACE INTO feeds(name, url, channel) " \
-                "VALUES (?, ?, ?);", (name, feed_url, channel_id))
-            await db.commit()
-            
     async def update_entry(self, entry_id: int, feed_name: str,
-        updated: str) -> None:
+        channel_id: int, updated: str) -> None:
             async with aiosqlite.connect(DATABASE) as db:
                 await db.execute(
-                    "REPLACE INTO entries(entry_id, feed_name, updated) " \
-                    "VALUES (?, ?, ?);", (entry_id, feed_name, updated))
+                    "REPLACE INTO " \
+                    "entries(feed_name, channel_id, entry_id, updated) " \
+                    "VALUES (?, ?, ?, ?);",
+                    (feed_name, channel_id, entry_id, updated))
                 await db.commit()
-            
-    async def get_feeds(self) -> list[aiosqlite.Row]:
-        feeds = []
-        async with aiosqlite.connect(DATABASE) as db:
-            async with db.execute("SELECT * FROM feeds;") as cursor:
-                async for row in cursor:
-                    feeds.append(row)
-        return feeds
         
     async def remove_feed(self, feed_url: str) -> None:
         async with aiosqlite.connect(DATABASE) as db:
             await db.execute("DELETE FROM feeds WHERE (url = ?)", (feed_url,))
             await db.commit()
         
-    async def get_entries(self, feed_name: str) -> list[aiosqlite.Row]:
+    async def get_entries(self, feed_name: str,
+            channel_id: int) -> list[aiosqlite.Row]:
         entries = []
         async with aiosqlite.connect(DATABASE) as db:
             async with db.execute(
-                    "SELECT * FROM entries WHERE (feed_name = ?);",
-                    (feed_name,)) as cursor: 
+                    "SELECT * FROM entries " \
+                    "WHERE(feed_name = ? AND channel_id = ?);",
+                    (feed_name, channel_id)) as cursor: 
                 async for row in cursor:
                     entries.append(row)
         return entries

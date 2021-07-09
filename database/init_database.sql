@@ -1,13 +1,16 @@
 PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS feeds (
-    name TEXT UNIQUE,
-    url TEXT NOT NULL,
-    channel INTEGER NOT NULL
+    name TEXT NOT NULL,
+    channel_id INTEGER NOT NULL UNIQUE,
+    guild_id INTEGER NOT NULL,
+    url TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS entries (
-    entry_id INTEGER,
-    feed_name TEXT,
-    updated TEXT
+    feed_name TEXT NOT NULL,
+    channel_id INTEGER NOT NULL,
+    entry_id INTEGER NOT NULL,
+    updated TEXT NOT NULL,
+    PRIMARY KEY (entry_id, channel_id)
 );
