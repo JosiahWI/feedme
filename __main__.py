@@ -1,6 +1,7 @@
 # FeedMe, JosiahVanderzee 2021 (c)
 
 import asyncio
+import os
 import pathlib
 
 import aiohttp
@@ -17,8 +18,9 @@ async def on_ready() -> None:
     
 async def start() -> None:
 
-    with open(f"{pathlib.Path(__file__).parent}/token.txt", "r") as token_file:
-        bot_token = token_file.readline().strip()
+    bot_token = os.environ.get("FEEDME_TOKEN")
+    if bot_token is None:
+        raise RuntimeError("Please set the FEEDME_TOKEN environment variable.")
 
     loop = asyncio.get_running_loop()
     loop.set_debug(True)
