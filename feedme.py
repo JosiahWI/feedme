@@ -120,7 +120,7 @@ class FeedMe(commands.Cog):
         self.config = configparser.ConfigParser()
         self.config.read(f"{pathlib.Path(__file__).parent}/config.ini")
         self.poller: Optional[asyncio.Task] = None
-        asyncio.get_event_loop().run_until_complete(self._init_database())
+        asyncio.run(self._init_database())
 
     async def _init_database(self) -> None:
         async with aiosqlite.connect(DATABASE) as db:

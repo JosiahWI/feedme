@@ -28,4 +28,4 @@ async def start() -> None:
         setattr(bot, "session", session)
         await bot.start(bot_token)
     
-asyncio.get_event_loop().run_until_complete(start())
+asyncio.run(start())
